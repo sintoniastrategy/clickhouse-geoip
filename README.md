@@ -16,9 +16,9 @@ SELECT geoip2_asn_org('77.88.8.8');        -- YANDEX LLC
 
 -- Point-in-time — the geo of an IP as of a given date (the whole point):
 -- dt selects the monthly snapshot; the IP is matched within that month's data.
-SELECT geoip2_dated_country (toDate('2024-03-15'), '8.8.8.8');
-SELECT geoip2_dated_city_get(toDate('2024-03-15'), 'city_name', '8.8.8.8');
-SELECT geoip2_dated_asn_get (toDate('2024-03-15'), 'autonomous_system_number', '77.88.8.8');
+SELECT geoip2_dated_country(toDate('2024-03-15'), '8.8.8.8');
+SELECT geoip2_dated_city(toDate('2024-03-15'), '8.8.8.8');
+SELECT geoip2_dated_asn_org(toDate('2024-03-15'), '77.88.8.8');
 ```
 
 IPv4 and IPv6 are both supported. Unknown / private IPs return `NULL`.
@@ -186,15 +186,19 @@ longest-prefix matching for both IPv4 and IPv6.
 All functions are SQL UDFs created by [`sql/02_common_funcs.sql`](sql/02_common_funcs.sql)
 and `sql/03_*_funcs.sql`.
 
-### Convenience functions (latest data)
+### Convenience functions
 
-| Function | Returns |
-|---|---|
-| `geoip2_country(ip)` | Country name |
-| `geoip2_country_iso_code(ip)` | Country ISO code |
-| `geoip2_city(ip)` | City name |
-| `geoip2_city_lat(ip)` / `geoip2_city_lon(ip)` | Latitude / longitude |
-| `geoip2_asn_org(ip)` | Autonomous-system organization |
+Every field comes in two forms: a **latest** form `geoip2_<x>(ip)` and a
+**point-in-time** form `geoip2_dated_<x>(dt, ip)`. The latest form is just the
+dated one called with `now()` — e.g. `geoip2_country(ip)` ≡ `geoip2_dated_country(now(), ip)`.
+
+| Latest | Point-in-time | Returns |
+|---|---|---|
+| `geoip2_country(ip)` | `geoip2_dated_country(dt, ip)` | Country name |
+| `geoip2_country_iso_code(ip)` | `geoip2_dated_country_iso_code(dt, ip)` | Country ISO code |
+| `geoip2_city(ip)` | `geoip2_dated_city(dt, ip)` | City name |
+| `geoip2_city_lat(ip)` / `geoip2_city_lon(ip)` | `geoip2_dated_city_lat(dt, ip)` / `geoip2_dated_city_lon(dt, ip)` | Latitude / longitude |
+| `geoip2_asn_org(ip)` | `geoip2_dated_asn_org(dt, ip)` | Autonomous-system organization |
 
 ### Generic getters (any attribute)
 
