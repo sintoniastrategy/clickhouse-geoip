@@ -1,0 +1,36 @@
+version: 2
+
+builds:
+  - main: ./cmd/mmdb2csv
+    binary: mmdb2csv
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "mmdb2csv_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: sintoniastrategy
+    name: clickhouse-geoip

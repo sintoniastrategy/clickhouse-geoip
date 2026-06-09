@@ -1,0 +1,26 @@
+CREATE DATABASE IF NOT EXISTS geoip;
+USE geoip;
+
+CREATE TABLE IF NOT EXISTS geoip2_asn__YYYYMM (
+    prefix String,
+
+    autonomous_system_number UInt64,
+    autonomous_system_organization String,
+    isp String,
+    organization String
+)
+ENGINE = MergeTree
+ORDER BY (prefix);
+
+CREATE DICTIONARY IF NOT EXISTS geoip2_asn_trie__YYYYMM (
+    prefix String,
+
+    autonomous_system_number UInt64,
+    autonomous_system_organization String,
+    isp String,
+    organization String
+)
+PRIMARY KEY prefix
+SOURCE(CLICKHOUSE(DB 'geoip' TABLE 'geoip2_asn__YYYYMM'))
+LAYOUT(ip_trie)
+LIFETIME(14400);

@@ -1,0 +1,47 @@
+name: ch-geoip
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: ch-geoip-clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - ch_data:/var/lib/clickhouse
+      # Adds a network-reachable `geoip` user WITHOUT removing the built-in
+      # `default` user (the dictionaries' internal loopback connections use it).
+      - ./docker/clickhouse-users.xml:/etc/clickhouse-server/users.d/geoip-user.xml:ro
+    ports:
+      - "127.0.0.1:18123:8123"   # HTTP, for ad-hoc queries from the host
+      - "127.0.0.1:19000:9000"   # native protocol
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "geoip", "--password", "geoip", "--query", "SELECT 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  # One-shot batch job. Run with:  docker compose run --rm updater
+  updater:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ch-geoip-updater:local
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_DB: geoip
+      # GEOIP_DATE and CLICKHOUSE_YYYYMM default to the current month.
+      # Override to load a specific db-ip Lite release, e.g.:
+      # GEOIP_DATE: "2026-06"
+      # CLICKHOUSE_YYYYMM: "202606"
+    volumes:
+      - geoip_db:/app/db          # cache downloads + CSVs across runs
+    restart: "no"
+
+volumes:
+  ch_data:
+  geoip_db:

@@ -1,0 +1,9 @@
+.git
+.claude
+.cache
+db
+updater.log
+*.log
+bin/mmdb2csv
+sql/*.yyyymm.sql
+sql/*.main.sql

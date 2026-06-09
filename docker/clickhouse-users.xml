@@ -1,0 +1,18 @@
+<!-- Adds a network-reachable application user `geoip`.
+     IMPORTANT: this does NOT remove the built-in `default` user. ClickHouse
+     dictionaries with SOURCE(CLICKHOUSE(...)) open an internal connection as
+     `default` over loopback to read their source tables, so `default` must
+     keep working on localhost (the image's standard config already allows it). -->
+<clickhouse>
+    <users>
+        <geoip>
+            <password>geoip</password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+        </geoip>
+    </users>
+</clickhouse>

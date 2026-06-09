@@ -1,0 +1,10 @@
+<!-- Default connection settings for bare clickhouse-client calls inside the
+     updater container. The script does not pass host/user flags, so they are
+     set here. Change these (or mount your own config) to target another
+     server. Credentials match the CLICKHOUSE_USER/PASSWORD of the service. -->
+<config>
+    <host>clickhouse</host>
+    <port>9000</port>
+    <user>geoip</user>
+    <password>geoip</password>
+</config>

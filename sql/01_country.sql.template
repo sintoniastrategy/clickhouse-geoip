@@ -1,0 +1,43 @@
+CREATE DATABASE IF NOT EXISTS geoip;
+USE geoip;
+
+CREATE TABLE IF NOT EXISTS geoip2_country__YYYYMM (
+    prefix String,
+
+    continent_code String,
+    continent_geoname_id UInt64,
+    continent_name String,
+
+    country_geoname_id UInt64,
+    country_is_in_european_union BOOL,
+    country_iso_code String,
+    country_name String,
+
+    registered_country_geoname_id UInt64,
+    registered_country_is_in_european_union BOOL,
+    registered_country_iso_code String,
+    registered_country_name String,
+
+    represented_country_geoname_id UInt64,
+    represented_country_is_in_european_union BOOL,
+    represented_country_iso_code String,
+    represented_country_type String,
+
+    traits_is_anonymous_proxy BOOL,
+    traits_is_satellite_provider BOOL
+)
+ENGINE = MergeTree
+ORDER BY (prefix);
+
+CREATE DICTIONARY IF NOT EXISTS geoip2_country_trie__YYYYMM (
+    prefix String,
+
+    country_geoname_id UInt64,
+    country_is_in_european_union BOOL,
+    country_iso_code String,
+    country_name String
+)
+PRIMARY KEY prefix
+SOURCE(CLICKHOUSE(DB 'geoip' TABLE 'geoip2_country__YYYYMM'))
+LAYOUT(ip_trie)
+LIFETIME(14400);
