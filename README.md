@@ -4,14 +4,21 @@ GeoIP lookups in ClickHouse, built from the free **[db-ip.com Lite](https://db-i
 databases (country / city / ASN). A small pipeline downloads the monthly
 `.mmdb` files, converts them to CSV with a Go tool, loads them into MergeTree
 tables, exposes them as `ip_trie` dictionaries, and wraps everything in
-easy-to-call SQL functions:
+easy-to-call SQL functions — including **point-in-time** lookups that resolve an
+IP against the database as it stood in a given month (the reason this exists):
 
 ```sql
-SELECT geoip2_country('8.8.8.8');        -- United States
+-- Latest data:
+SELECT geoip2_country('8.8.8.8');          -- United States
 SELECT geoip2_country_iso_code('1.1.1.1'); -- AU
-SELECT geoip2_city('8.8.8.8');           -- Mountain View
-SELECT geoip2_asn_org('77.88.8.8');      -- YANDEX LLC
-SELECT geoip2_city_lat('8.8.8.8'), geoip2_city_lon('8.8.8.8'); -- 37.422, -122.085
+SELECT geoip2_city('8.8.8.8');             -- Mountain View
+SELECT geoip2_asn_org('77.88.8.8');        -- YANDEX LLC
+
+-- Point-in-time — the geo of an IP as of a given date (the whole point):
+-- dt selects the monthly snapshot; the IP is matched within that month's data.
+SELECT geoip2_dated_country (toDate('2024-03-15'), '8.8.8.8');
+SELECT geoip2_dated_city_get(toDate('2024-03-15'), 'city_name', '8.8.8.8');
+SELECT geoip2_dated_asn_get (toDate('2024-03-15'), 'autonomous_system_number', '77.88.8.8');
 ```
 
 IPv4 and IPv6 are both supported. Unknown / private IPs return `NULL`.
