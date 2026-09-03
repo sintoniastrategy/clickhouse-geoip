@@ -12,6 +12,29 @@ GEOIP_COUNTRY_URL="${GEOIP_COUNTRY_URL:-https://download.db-ip.com/free/dbip-cou
 GEOIP_CITY_URL="${GEOIP_CITY_URL:-https://download.db-ip.com/free/dbip-city-lite-${GEOIP_DATE}.mmdb.gz}"
 GEOIP_ASN_URL="${GEOIP_ASN_URL:-https://download.db-ip.com/free/dbip-asn-lite-${GEOIP_DATE}.mmdb.gz}"
 
+# Use an .mmdb that is already on disk instead of downloading one. Set per
+# db type; a single combined database may back all three. Anything fetched
+# and verified elsewhere (a paid subscription, a mirror) belongs here.
+GEOIP_COUNTRY_FILE="${GEOIP_COUNTRY_FILE:-}"
+GEOIP_CITY_FILE="${GEOIP_CITY_FILE:-}"
+GEOIP_ASN_FILE="${GEOIP_ASN_FILE:-}"
+
+# Keep each month in geoip2_<type>_history as its own partition, so
+# geoip2_dated_*() can answer point-in-time questions. History is a table
+# and nothing else: no dictionary is built over it, so a kept month costs
+# disk and no memory. Turning this off loads the live tables only, and the
+# dated getters then return NULL for every month.
+GEOIP_SNAPSHOTS="${GEOIP_SNAPSHOTS:-1}"
+
+# Merge consecutive networks that carry identical values into the largest
+# aligned prefixes. Lookups are unchanged (see
+# internal/csvdumper/collapse.go), and one database feeding several tables
+# is the normal case, so this is on by default: a country table cut at ISP
+# boundaries carries tens of millions of rows the data cannot distinguish,
+# and every one of them is a prefix in the ip_trie built on top. Set to 0
+# to dump every network verbatim.
+GEOIP_COLLAPSE="${GEOIP_COLLAPSE:-1}"
+
 # Paths
 LOG_FILE="${WORK_DIR}/updater.log"
 DB_DIR="${WORK_DIR}/db"
@@ -44,68 +67,155 @@ decompress() {
     mv "${out}.tmp" "$out"
 }
 
-# Convert if needed
-convert() {
-    local mmdb="$1" csv="$2"
-    [ -f "$csv" ] && [ -s "$csv" ] && { log "Skip: $(basename "$csv")"; return 0; }
-    local dbtype=$(echo "$(basename "$mmdb")" | cut -d '.' -f1)
-    log "Convert: $(basename "$mmdb") [$dbtype] to ${csv}"
-    "${BIN_DIR}/mmdb2csv" -db-path "$mmdb" -db-type "$dbtype" -no-quotes > "${csv}.tmp"
-    mv "${csv}.tmp" "$csv"
-}
+# Resolve one db type to a readable .mmdb, in $MMDB_PATH. No CSV is
+# produced: the converter is streamed into ClickHouse instead, so nothing
+# intermediate lands on disk.
+resolve_mmdb() {
+    local dbtype="$1" url="$2" file="$3"
 
-# Check if table loaded (same row count as CSV)
-is_loaded() {
-    local table="$1" csv="$2"
-    local csv_rows=$(wc -l < "$csv" | tr -d ' ')
-    csv_rows=$((csv_rows - 1))
-    local tbl_rows=$(clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM $table" 2>/dev/null || echo "0")
-    [ "$csv_rows" = "$tbl_rows" ] && [ "$csv_rows" != "0" ] && { log "Skip: $table ($tbl_rows rows)"; return 0; }
-    return 1
-}
-
-is_loaded2() {
-    local table="$1" table2="$2"
-    local tbl_rows2=$(clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM $table2" 2>/dev/null || echo "0")
-    local tbl_rows=$(clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM $table" 2>/dev/null || echo "0")
-    [ "$tbl_rows2" = "$tbl_rows" ] && [ "$tbl_rows2" != "0" ] && { log "Skip: $table ($tbl_rows rows)"; return 0; }
-    return 1
-}
-
-# Load table
-load() {
-    local table="$1" csv="$2"
-    is_loaded "$table" "$csv" && return 0
-    log "Load: $table"
-    clickhouse-client -d "$CLICKHOUSE_DB" -q "TRUNCATE TABLE IF EXISTS $table" 2>/dev/null || true
-    clickhouse-client -d "$CLICKHOUSE_DB" -q "INSERT INTO $table SETTINGS input_format_csv_empty_as_default = 1 FORMAT CSVWithNames" < "$csv"
-
-    log "Loaded: $(clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM $table") rows"
-}
-
-# Load table
-load2() {
-    local table="$1" table2="$2"
-    is_loaded2 "$table" "$table2" && return 0
-    log "Load: $table"
-    clickhouse-client -d "$CLICKHOUSE_DB" -q "TRUNCATE TABLE IF EXISTS $table" 2>/dev/null || true
-    clickhouse-client -d "$CLICKHOUSE_DB" -q "INSERT INTO $table SELECT * FROM $table2"
-    log "Loaded: $(clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM $table") rows"
-}
-
-insert_meta() {
-    local table="$1"
-    local db_type=$(echo "$table" | cut -d_ -f2 | cut -d_ -f1)
-    # meta must point at the dated TRIE DICTIONARY that dictGet resolves,
-    # not at the source MergeTree table.
-    local target_dict="geoip2_${db_type}_trie__${CLICKHOUSE_YYYYMM}"
-    loaded=$(clickhouse-client -d geoip -q "SELECT count() FROM meta_geoip2 WHERE yyyymm=$CLICKHOUSE_YYYYMM AND db_type='$db_type'")
-    if [ x"$loaded" != x"1" ]; then
-        clickhouse-client -d geoip -q "INSERT INTO meta_geoip2 VALUES ($CLICKHOUSE_YYYYMM, '$db_type', '$target_dict')"
-        log "Inserted meta: ($CLICKHOUSE_YYYYMM, '$db_type', '$target_dict')"
-    else
-        log "Skip meta: ($CLICKHOUSE_YYYYMM, '$db_type', '$target_dict')"
+    if [ -n "$file" ]; then
+        [ -r "$file" ] || error "local mmdb for ${dbtype} is unreadable: ${file}"
+        log "Local: ${file} [${dbtype}]"
+        MMDB_PATH="$file"
+        return 0
     fi
+
+    local gz="${DB_DIR}/${dbtype}.${GEOIP_DATE}.mmdb.gz"
+    download "$url" "$gz"
+    decompress "$gz"
+    MMDB_PATH="${gz%.gz}"
+}
+
+# Records that a month/type has been ingested, and with which converter
+# settings: a collapsed load is different data, so toggling the flag must
+# not look like "already done". Holds the row count, checked against the
+# table so a dropped database is noticed rather than skipped.
+marker_path() {
+    if [ "$GEOIP_COLLAPSE" = "1" ]; then
+        echo "${DB_DIR}/${1}.${GEOIP_DATE}.collapsed.loaded"
+    else
+        echo "${DB_DIR}/${1}.${GEOIP_DATE}.loaded"
+    fi
+}
+
+# Stream the converter straight into a table. `set -o pipefail` makes
+# either side's failure fail the load, which is the point: a CSV cut short
+# by a killed process still looks like a plausible file, a broken pipe
+# does not.
+stream_into() {
+    local table="$1" mmdb="$2" dbtype="$3"
+    local collapse_flag=""
+    [ "$GEOIP_COLLAPSE" = "1" ] && collapse_flag="-collapse"
+
+    log "Load: $table  (streaming $(basename "$mmdb") [$dbtype])"
+    clickhouse-client -d "$CLICKHOUSE_DB" -q "TRUNCATE TABLE IF EXISTS $table" 2>/dev/null || true
+    # An INSERT from a stream commits block by block, so a failure part way
+    # through leaves the target partly filled. That target is never a live
+    # table — publish/swap_in put the data in place only after this
+    # returns — but empty it anyway, so nothing later mistakes a fragment
+    # for a load.
+    # shellcheck disable=SC2086  # deliberately unquoted: empty means absent
+    if ! "${BIN_DIR}/mmdb2csv" -db-path "$mmdb" -db-type "$dbtype" -no-quotes ${collapse_flag} \
+        | clickhouse-client -d "$CLICKHOUSE_DB" \
+            -q "INSERT INTO $table SETTINGS input_format_csv_empty_as_default = 1 FORMAT CSVWithNames"; then
+        clickhouse-client -d "$CLICKHOUSE_DB" -q "TRUNCATE TABLE IF EXISTS $table" 2>/dev/null || true
+        error "streaming $dbtype into $table failed"
+    fi
+
+    local loaded
+    loaded=$(clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM $table")
+    # A geo database is never legitimately empty, and the ledger row that
+    # may follow would otherwise advertise a month holding nothing.
+    [ "$loaded" -gt 0 ] || error "$table loaded 0 rows from $(basename "$mmdb")"
+    log "Loaded: ${loaded} rows"
+}
+
+# Fill a staging copy of one db type's live table. Nothing goes live here:
+# publishing is deferred so that every type can be swapped in together.
+#
+# Returns 1 when this month is already loaded, so the caller knows not to
+# include the type in the publish.
+stage() {
+    local dt="$1" mmdb="$2"
+    local live="geoip2_${dt}"
+    local staging="${live}__staging"
+    local marker
+    marker="$(marker_path "$dt")"
+
+    if [ -f "$marker" ] \
+        && [ "$(cat "$marker" 2>/dev/null)" = "$(clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM $live" 2>/dev/null)" ]; then
+        log "Skip: $live ($(cat "$marker") rows)"
+        return 1
+    fi
+
+    clickhouse-client -d "$CLICKHOUSE_DB" -q "DROP TABLE IF EXISTS $staging"
+    clickhouse-client -d "$CLICKHOUSE_DB" -q "CREATE TABLE $staging AS $live"
+    stream_into "$staging" "$mmdb" "$dt"
+
+    # Refuse to carry an empty table into the publish. stream_into already
+    # fails a zero-row load, so this only fires if something else emptied
+    # the staging table — and swapping it in would blank the live one.
+    [ "$(clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM $staging")" -gt 0 ] \
+        || error "refusing to publish $live from empty $staging"
+
+    if [ "$GEOIP_SNAPSHOTS" = "1" ]; then
+        # The month's partition, copied out of staging while staging still
+        # holds the new data — after the exchange it holds the old one.
+        # Dropping first makes a retry after a failed run clean; dropping a
+        # partition that does not exist is a no-op.
+        local hist="geoip2_${dt}_history"
+        clickhouse-client -d "$CLICKHOUSE_DB" -q "ALTER TABLE $hist DROP PARTITION ${CLICKHOUSE_YYYYMM}"
+        clickhouse-client -d "$CLICKHOUSE_DB" -q "INSERT INTO $hist SELECT ${CLICKHOUSE_YYYYMM}, * FROM $staging"
+        log "Archived: ${hist} partition ${CLICKHOUSE_YYYYMM} ($(clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM $hist WHERE yyyymm = ${CLICKHOUSE_YYYYMM}") rows)"
+    fi
+}
+
+# Put every staged table live in a single statement.
+#
+# Two things this buys. TRUNCATE + INSERT would leave a live table empty
+# for as long as the insert takes; the ip_trie dictionaries cache for
+# LIFETIME seconds, so a reload landing in that window loads an empty
+# dictionary and every lookup — and anything enriching rows on insert from
+# one — silently gets nothing back until the end of the run. And doing the
+# types one at a time means a run that dies between country and city
+# leaves a live country from the new month next to a city from the old one:
+# each table consistent by itself, the months apart until the next run.
+# EXCHANGE TABLES takes several pairs at once and renames them all, so
+# neither window exists.
+#
+# It needs an Atomic database (the default since 20.10). Older engines keep
+# the truncate+insert path, which cannot be atomic across three tables —
+# there the months can still diverge, and there is no way around it.
+publish_all() {
+    if [ "$#" -eq 0 ]; then
+        log "Nothing to publish"
+        return 0
+    fi
+
+    local dt pairs=""
+    for dt in "$@"; do
+        [ -n "$pairs" ] && pairs="${pairs}, "
+        pairs="${pairs}geoip2_${dt} AND geoip2_${dt}__staging"
+    done
+
+    if [ "$(clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT engine FROM system.databases WHERE name = '${CLICKHOUSE_DB}'")" = "Atomic" ]; then
+        log "Publish: $* (one atomic exchange)"
+        clickhouse-client -d "$CLICKHOUSE_DB" -q "EXCHANGE TABLES $pairs"
+    else
+        log "Publish: $* (truncate+insert per table, database engine is not Atomic)"
+        for dt in "$@"; do
+            clickhouse-client -d "$CLICKHOUSE_DB" -q "TRUNCATE TABLE IF EXISTS geoip2_${dt}" 2>/dev/null || true
+            clickhouse-client -d "$CLICKHOUSE_DB" -q "INSERT INTO geoip2_${dt} SELECT * FROM geoip2_${dt}__staging"
+        done
+    fi
+
+    # Markers are written only now: before the exchange nothing was live,
+    # so a run that died earlier must reload rather than skip.
+    for dt in "$@"; do
+        clickhouse-client -d "$CLICKHOUSE_DB" -q "DROP TABLE IF EXISTS geoip2_${dt}__staging"
+        clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM geoip2_${dt}" > "$(marker_path "$dt")"
+        log "Loaded: geoip2_${dt} $(cat "$(marker_path "$dt")") rows"
+    done
 }
 
 # Resolve mmdb2csv: prefer an existing binary, else download the prebuilt
@@ -155,35 +265,19 @@ if [ ! -x "$MMDB2CSV" ]; then
     log "mmdb2csv ready: $("$MMDB2CSV" -version 2>/dev/null || echo unknown)"
 fi
 
-# Process country
-COUNTRY_GZ="${DB_DIR}/country.${GEOIP_DATE}.mmdb.gz"
-COUNTRY_MMDB="${COUNTRY_GZ%.gz}"
-COUNTRY_CSV="${DB_DIR}/country.${GEOIP_DATE}.csv"
-download $GEOIP_COUNTRY_URL "$COUNTRY_GZ"
-decompress "$COUNTRY_GZ"
-convert "$COUNTRY_MMDB" "$COUNTRY_CSV"
+# Resolve each database to a file on disk
+resolve_mmdb country "$GEOIP_COUNTRY_URL" "$GEOIP_COUNTRY_FILE"; COUNTRY_MMDB="$MMDB_PATH"
+resolve_mmdb city    "$GEOIP_CITY_URL"    "$GEOIP_CITY_FILE";    CITY_MMDB="$MMDB_PATH"
+resolve_mmdb asn     "$GEOIP_ASN_URL"     "$GEOIP_ASN_FILE";     ASN_MMDB="$MMDB_PATH"
 
-# Process city
-CITY_GZ="${DB_DIR}/city.${GEOIP_DATE}.mmdb.gz"
-CITY_MMDB="${CITY_GZ%.gz}"
-CITY_CSV="${DB_DIR}/city.${GEOIP_DATE}.csv"
-download $GEOIP_CITY_URL "$CITY_GZ"
-decompress "$CITY_GZ"
-convert "$CITY_MMDB" "$CITY_CSV"
-
-# Process ASN
-ASN_GZ="${DB_DIR}/asn.${GEOIP_DATE}.mmdb.gz"
-ASN_MMDB="${ASN_GZ%.gz}"
-ASN_CSV="${DB_DIR}/asn.${GEOIP_DATE}.csv"
-download $GEOIP_ASN_URL "$ASN_GZ"
-decompress "$ASN_GZ"
-convert "$ASN_MMDB" "$ASN_CSV"
-
-# Prepare schemas
-for tpl in "${SCHEMA_DIR}"/*.sql.template; do
-    sed "s/YYYYMM/${CLICKHOUSE_YYYYMM}/g" "$tpl" > "${SCHEMA_DIR}/$(basename "$tpl" .template)".yyyymm.sql
-    sed "s/__YYYYMM//g" "$tpl" > "${SCHEMA_DIR}/$(basename "$tpl" .template)".main.sql
-done
+# Earlier versions rendered the per-type schemas from *.sql.template into
+# generated .main.sql / .yyyymm.sql / .absent.sql. There is nothing left to
+# substitute — a month is a partition now, not a table name — so the
+# schemas are plain .sql. Releases are unpacked in place and every
+# sql/*.sql is executed below, so the leftovers have to be removed rather
+# than merely left ungenerated: a stale .yyyymm.sql would go on recreating
+# the per-month tables and dictionaries this version stopped making.
+rm -f "${SCHEMA_DIR}"/*.yyyymm.sql "${SCHEMA_DIR}"/*.main.sql "${SCHEMA_DIR}"/*.absent.sql
 
 # Ensure the target database exists before connecting with -d
 clickhouse-client -q "CREATE DATABASE IF NOT EXISTS ${CLICKHOUSE_DB}"
@@ -194,32 +288,33 @@ for sql in "${SCHEMA_DIR}"/*.sql; do
     clickhouse-client -d "$CLICKHOUSE_DB" < "$sql"
 done
 
-# Load data
-load "geoip2_country__${CLICKHOUSE_YYYYMM}" "$COUNTRY_CSV"
-insert_meta "geoip2_country__${CLICKHOUSE_YYYYMM}"
+# Load everything into staging first, then put it all live at once. A type
+# whose month is already loaded is skipped and stays out of the exchange.
+STAGED=""
+stage country "$COUNTRY_MMDB" && STAGED="$STAGED country"
+stage city    "$CITY_MMDB"    && STAGED="$STAGED city"
+stage asn     "$ASN_MMDB"     && STAGED="$STAGED asn"
 
-load "geoip2_city__${CLICKHOUSE_YYYYMM}" "$CITY_CSV"
-insert_meta "geoip2_city__${CLICKHOUSE_YYYYMM}"
+# shellcheck disable=SC2086  # deliberately unquoted: one word per db type
+publish_all $STAGED
 
-load "geoip2_asn__${CLICKHOUSE_YYYYMM}" "$ASN_CSV"
-insert_meta "geoip2_asn__${CLICKHOUSE_YYYYMM}"
-
-# Load data
-load2 "geoip2_country" "geoip2_country__${CLICKHOUSE_YYYYMM}"
-load2 "geoip2_city" "geoip2_city__${CLICKHOUSE_YYYYMM}"
-load2 "geoip2_asn" "geoip2_asn__${CLICKHOUSE_YYYYMM}"
-
-# Refresh dictionaries so the new data + month become visible immediately.
-# (meta_geoip2_dict has LIFETIME(0) and never auto-reloads; the trie dicts
-#  cache for LIFETIME seconds, so a fresh load would otherwise lag.)
+# Refresh the live dictionaries so the new data is visible at once: they
+# cache for LIFETIME seconds and their source table was just swapped, so
+# without this a lookup keeps answering from the previous month for up to
+# that long.
+#
+# The month's own dictionary is deliberately NOT reloaded. It was created a
+# moment ago and has never been loaded, so it has nothing stale to refresh
+# — reloading it only forces a full copy into memory that nobody has asked
+# for. With dictionaries_lazy_load (on by default) an archived month costs
+# nothing until a dated lookup actually touches it.
 log "Reload dictionaries"
 for dt in country city asn; do
     clickhouse-client -d "$CLICKHOUSE_DB" -q "SYSTEM RELOAD DICTIONARY geoip2_${dt}_trie"
-    clickhouse-client -d "$CLICKHOUSE_DB" -q "SYSTEM RELOAD DICTIONARY geoip2_${dt}_trie__${CLICKHOUSE_YYYYMM}"
 done
-clickhouse-client -d "$CLICKHOUSE_DB" -q "SYSTEM RELOAD DICTIONARY meta_geoip2_dict"
 
-# Cleanup old files (>90 days)
-find "${DB_DIR}" -type f -mtime +90 -delete 2>/dev/null || true
+# Cleanup downloaded databases (>90 days). Markers are a few bytes and
+# outlive them deliberately, so an old month is not re-ingested.
+find "${DB_DIR}" -type f \( -name '*.mmdb' -o -name '*.mmdb.gz' \) -mtime +90 -delete 2>/dev/null || true
 
 log "Update complete!"

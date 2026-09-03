@@ -19,6 +19,7 @@ var version = "dev"
 // ClickHouse CSV mode
 var (
 	noQuotes    bool
+	collapse    bool
 	dbTypeFlag  string
 	dbPathFlag  string
 	showVersion bool
@@ -26,6 +27,8 @@ var (
 
 func init() {
 	flag.BoolVar(&noQuotes, "no-quotes", false, "do not quote fields")
+	flag.BoolVar(&collapse, "collapse", false,
+		"merge consecutive networks with identical values into the largest aligned prefixes; lookups are unchanged")
 	flag.StringVar(&dbTypeFlag, "db-type", "", "database type to dump: city, connections, country, isp, enterprise")
 	flag.StringVar(&dbPathFlag, "db-path", "", "path to the MMDB file")
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
@@ -73,15 +76,15 @@ func main() {
 	var err2 error
 	switch strings.ToLower(dbTypeFlag) {
 	case "city":
-		err2 = csvdumper.DumpCity(networks, writer, noQuotes)
+		err2 = csvdumper.DumpCity(networks, writer, noQuotes, collapse)
 	case "connections":
-		err2 = csvdumper.DumpConnections(networks, writer, noQuotes)
+		err2 = csvdumper.DumpConnections(networks, writer, noQuotes, collapse)
 	case "country":
-		err2 = csvdumper.DumpCountry(networks, writer, noQuotes)
+		err2 = csvdumper.DumpCountry(networks, writer, noQuotes, collapse)
 	case "isp", "asn":
-		err2 = csvdumper.DumpISP(networks, writer, noQuotes)
+		err2 = csvdumper.DumpISP(networks, writer, noQuotes, collapse)
 	case "enterprise":
-		err2 = csvdumper.DumpEnterprise(networks, writer, noQuotes)
+		err2 = csvdumper.DumpEnterprise(networks, writer, noQuotes, collapse)
 	default:
 		log.Fatal("Please provide --db-type as one of: city, connections, country, isp, enterprise")
 	}

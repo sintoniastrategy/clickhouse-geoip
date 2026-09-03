@@ -14,7 +14,7 @@ var connectionsColumns = []Column[geoip2.ConnectionType]{
 	},
 }
 
-func DumpConnections(networks *maxminddb.Networks, writer *csv.Writer, noQuotes bool) error {
+func DumpConnections(networks *maxminddb.Networks, writer *csv.Writer, noQuotes bool, collapse bool) error {
 	rec := geoip2.ConnectionType{}
-	return DumpRows(networks, writer, noQuotes, &rec, connectionsColumns)
+	return DumpRows(networks, writer, noQuotes, collapse, &rec, connectionsColumns)
 }
