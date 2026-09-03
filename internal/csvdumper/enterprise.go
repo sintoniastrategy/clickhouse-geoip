@@ -211,7 +211,7 @@ var enterpriseColumns = []Column[geoip2.Enterprise]{
 	},
 }
 
-func DumpEnterprise(networks *maxminddb.Networks, writer *csv.Writer, noQuotes bool) error {
+func DumpEnterprise(networks *maxminddb.Networks, writer *csv.Writer, noQuotes bool, collapse bool) error {
 	rec := geoip2.Enterprise{}
-	return DumpRows(networks, writer, noQuotes, &rec, enterpriseColumns)
+	return DumpRows(networks, writer, noQuotes, collapse, &rec, enterpriseColumns)
 }

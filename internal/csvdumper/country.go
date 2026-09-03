@@ -79,7 +79,7 @@ var countryColumns = []Column[geoip2.Country]{
 	},
 }
 
-func DumpCountry(networks *maxminddb.Networks, writer *csv.Writer, noQuotes bool) error {
+func DumpCountry(networks *maxminddb.Networks, writer *csv.Writer, noQuotes bool, collapse bool) error {
 	rec := geoip2.Country{}
-	return DumpRows(networks, writer, noQuotes, &rec, countryColumns)
+	return DumpRows(networks, writer, noQuotes, collapse, &rec, countryColumns)
 }
