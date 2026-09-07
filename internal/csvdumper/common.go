@@ -9,9 +9,6 @@ import (
 	"github.com/oschwald/maxminddb-golang"
 )
 
-// maxminddbNetworks aliases the iterator to keep the generic signature short.
-type maxminddbNetworks = maxminddb.Networks
-
 func removeUnsafeChars(strarr []string) []string {
 	output := []string{}
 	replacer := strings.NewReplacer("\"", "", "'", "")
@@ -49,7 +46,7 @@ func sameValues(a, b []string) bool {
 }
 
 func DumpRows[R any](
-	networks *maxminddbNetworks,
+	networks *maxminddb.Networks,
 	writer *csv.Writer,
 	noQuotes bool,
 	collapse bool,

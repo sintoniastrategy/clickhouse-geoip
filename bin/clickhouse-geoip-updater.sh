@@ -12,16 +12,11 @@ GEOIP_COUNTRY_URL="${GEOIP_COUNTRY_URL:-https://download.db-ip.com/free/dbip-cou
 GEOIP_CITY_URL="${GEOIP_CITY_URL:-https://download.db-ip.com/free/dbip-city-lite-${GEOIP_DATE}.mmdb.gz}"
 GEOIP_ASN_URL="${GEOIP_ASN_URL:-https://download.db-ip.com/free/dbip-asn-lite-${GEOIP_DATE}.mmdb.gz}"
 
-# Use an .mmdb already on disk instead of downloading. One combined
-# database may back all three types.
 GEOIP_COUNTRY_FILE="${GEOIP_COUNTRY_FILE:-}"
 GEOIP_CITY_FILE="${GEOIP_CITY_FILE:-}"
 GEOIP_ASN_FILE="${GEOIP_ASN_FILE:-}"
 
-# Keep each month as a geoip2_<type>_history partition, so geoip2_dated_*()
-# can answer. No dictionary over it: a kept month costs disk, not memory.
 GEOIP_SNAPSHOTS="${GEOIP_SNAPSHOTS:-1}"
-
 GEOIP_COLLAPSE="${GEOIP_COLLAPSE:-1}"
 
 # Paths
