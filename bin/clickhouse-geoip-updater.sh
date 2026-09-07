@@ -106,7 +106,11 @@ stream_into() {
 }
 
 # Fill a staging copy of one type's live table; nothing goes live here, so
-# every type can be swapped in together. Returns 1 if the month is loaded.
+# every type can be swapped in together.
+#
+# Exit codes matter because this runs as a background job: 0 staged, 2 already
+# loaded, 1 failed — error() exits 1. Without the split, a failed conversion
+# would look like a skip and the type would silently keep last month's data.
 stage() {
     local dt="$1" mmdb="$2"
     local live="geoip2_${dt}"
@@ -117,7 +121,7 @@ stage() {
     if [ -f "$marker" ] \
         && [ "$(cat "$marker" 2>/dev/null)" = "$(clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM $live" 2>/dev/null)" ]; then
         log "Skip: $live ($(cat "$marker") rows)"
-        return 1
+        return 2
     fi
 
     clickhouse-client -d "$CLICKHOUSE_DB" -q "DROP TABLE IF EXISTS $staging"
@@ -241,12 +245,26 @@ for sql in "${SCHEMA_DIR}"/*.sql; do
     clickhouse-client -d "$CLICKHOUSE_DB" < "$sql"
 done
 
-# Load everything into staging first, then put it all live at once. A type
-# whose month is already loaded is skipped and stays out of the exchange.
+started=()
+start() {
+    stage "$1" "$2" &
+    started+=("$1:$!")
+}
+
+start country "$COUNTRY_MMDB"
+start city    "$CITY_MMDB"
+start asn     "$ASN_MMDB"
+
 STAGED=""
-stage country "$COUNTRY_MMDB" && STAGED="$STAGED country"
-stage city    "$CITY_MMDB"    && STAGED="$STAGED city"
-stage asn     "$ASN_MMDB"     && STAGED="$STAGED asn"
+for job in "${started[@]}"; do
+    rc=0
+    wait "${job#*:}" || rc=$?
+    case "$rc" in
+        0) STAGED="$STAGED ${job%:*}" ;;
+        2) ;;  # already loaded, stays out of the exchange
+        *) error "${job%:*} failed to load" ;;
+    esac
+done
 
 # shellcheck disable=SC2086  # deliberately unquoted: one word per db type
 publish_all $STAGED

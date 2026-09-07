@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/csv"
 	"flag"
 	"fmt"
@@ -63,9 +64,8 @@ func main() {
 		}
 	}(db)
 
-	// open CSV writer, and write header
-	writer := csv.NewWriter(os.Stdout)
-	defer writer.Flush()
+	out := bufio.NewWriterSize(os.Stdout, 1<<20)
+	writer := csv.NewWriter(out)
 
 	// skip aliased networks
 	networks := db.Networks(maxminddb.SkipAliasedNetworks)
@@ -92,5 +92,13 @@ func main() {
 	}
 	if networks.Err() != nil {
 		log.Panic(networks.Err())
+	}
+
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		log.Fatal(err)
+	}
+	if err := out.Flush(); err != nil {
+		log.Fatal(err)
 	}
 }
