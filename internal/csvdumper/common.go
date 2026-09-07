@@ -2,22 +2,12 @@ package csvdumper
 
 import (
 	"encoding/csv"
-	"log"
 	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/oschwald/maxminddb-golang"
 )
-
-func removeUnsafeChars(strarr []string) []string {
-	output := []string{}
-	replacer := strings.NewReplacer("\"", "", "'", "")
-
-	for _, str := range strarr {
-		output = append(output, strings.TrimSpace(replacer.Replace(str)))
-	}
-	return output
-}
 
 type ValueGetter[R any] func(*R) string
 
@@ -26,23 +16,52 @@ type Column[R any] struct {
 	Getter ValueGetter[R]
 }
 
-func writeRow(writer *csv.Writer, row []string, noQuotes bool) error {
+var unsafeChars = strings.NewReplacer(`"`, "", "'", "")
+
+func dumpRow(writer *csv.Writer, prefix string, values []string, noQuotes bool) error {
+	row := make([]string, 0, len(values)+1)
+	row = append(row, prefix)
+	row = append(row, values...)
 	if noQuotes {
-		return writer.Write(removeUnsafeChars(row))
+		for i, field := range row {
+			row[i] = strings.TrimSpace(unsafeChars.Replace(field))
+		}
 	}
 	return writer.Write(row)
 }
 
-func sameValues(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+type collapser struct {
+	writer   *csv.Writer
+	noQuotes bool
+
+	stack  mergeStack
+	values []string
+	open   bool
+}
+
+func (c *collapser) add(p netip.Prefix, values []string) error {
+	if c.open && (!slices.Equal(c.values, values) || c.stack.full()) {
+		if err := c.flush(); err != nil {
+			return err
 		}
 	}
-	return true
+	c.stack.push(p)
+	c.values = values
+	c.open = true
+	return nil
+}
+
+func (c *collapser) flush() error {
+	if !c.open {
+		return nil
+	}
+	for _, p := range c.stack.drain() {
+		if err := dumpRow(c.writer, p.String(), c.values, c.noQuotes); err != nil {
+			return err
+		}
+	}
+	c.open = false
+	return nil
 }
 
 func DumpRows[R any](
@@ -63,23 +82,7 @@ func DumpRows[R any](
 		return err
 	}
 
-	emit := func(prefixes []netip.Prefix, values []string) error {
-		for _, p := range prefixes {
-			row := make([]string, 0, len(values)+1)
-			row = append(row, p.String())
-			row = append(row, values...)
-			if err := writeRow(writer, row, noQuotes); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	var (
-		pending  run
-		prev     []string
-		havePrev bool
-	)
+	runs := collapser{writer: writer, noQuotes: noQuotes}
 
 	for networks.Next() {
 		// maxminddb leaves absent fields untouched and the struct is reused for
@@ -90,7 +93,7 @@ func DumpRows[R any](
 
 		subnet, err := networks.Network(record)
 		if err != nil {
-			log.Fatalln(err)
+			return err
 		}
 
 		values := make([]string, 0, len(cols))
@@ -98,34 +101,20 @@ func DumpRows[R any](
 			values = append(values, c.Getter(record))
 		}
 
-		prefix, convertible := netip.Prefix{}, false
+		prefix, mergeable := netip.Prefix{}, false
 		if collapse {
-			prefix, convertible = toPrefix(subnet)
+			prefix, mergeable = toPrefix(subnet)
 		}
-		if !collapse || !convertible {
-			row := make([]string, 0, len(values)+1)
-			row = append(row, subnet.String())
-			row = append(row, values...)
-			if err := writeRow(writer, row, noQuotes); err != nil {
+		if !mergeable {
+			if err := dumpRow(writer, subnet.String(), values, noQuotes); err != nil {
 				return err
 			}
 			continue
 		}
-
-		if havePrev && (!sameValues(prev, values) || pending.full()) {
-			if err := emit(pending.drain(), prev); err != nil {
-				return err
-			}
-		}
-		pending.add(prefix)
-		prev = values
-		havePrev = true
-	}
-
-	if havePrev {
-		if err := emit(pending.drain(), prev); err != nil {
+		if err := runs.add(prefix, values); err != nil {
 			return err
 		}
 	}
-	return nil
+
+	return runs.flush()
 }
