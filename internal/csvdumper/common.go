@@ -84,8 +84,7 @@ func DumpRows[R any](
 	for networks.Next() {
 		// maxminddb leaves absent fields untouched and the struct is reused for
 		// the whole traversal, so without this a missing field inherits the
-		// previous network's value — 10.4% of DB-IP's networks have no
-		// organization, and every one of them was served a neighbour's.
+		// previous network's value
 		var zero R
 		*record = zero
 
