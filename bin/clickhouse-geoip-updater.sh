@@ -22,8 +22,6 @@ GEOIP_ASN_FILE="${GEOIP_ASN_FILE:-}"
 # can answer. No dictionary over it: a kept month costs disk, not memory.
 GEOIP_SNAPSHOTS="${GEOIP_SNAPSHOTS:-1}"
 
-# Merge adjacent equal-valued networks into larger prefixes; lookups
-# unchanged (internal/csvdumper/collapse.go). Country: 88.8M rows -> 2.2M.
 GEOIP_COLLAPSE="${GEOIP_COLLAPSE:-1}"
 
 # Paths
