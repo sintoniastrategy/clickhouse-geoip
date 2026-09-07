@@ -7,10 +7,6 @@ import (
 	"github.com/oschwald/maxminddb-golang"
 )
 
-// ispRecord covers both shapes these fields arrive in: GeoIP2-ISP carries
-// them at the top level, Enterprise-shaped databases nest them under traits
-// and leave the top empty — DB-IP's "IP to Location + ISP" is one of those.
-// Without reading both, -db-type asn emits empty ASN columns and no error.
 type ispRecord struct {
 	AutonomousSystemNumber       uint   `maxminddb:"autonomous_system_number"`
 	AutonomousSystemOrganization string `maxminddb:"autonomous_system_organization"`
@@ -54,11 +50,15 @@ var ispColumns = []Column[ispRecord]{
 	},
 	{
 		Header: "isp",
-		Getter: func(r *ispRecord) string { return firstNonEmpty(r.ISP, r.Traits.ISP) },
+		Getter: func(r *ispRecord) string {
+			return firstNonEmpty(r.ISP, r.Traits.ISP)
+		},
 	},
 	{
 		Header: "organization",
-		Getter: func(r *ispRecord) string { return firstNonEmpty(r.Organization, r.Traits.Organization) },
+		Getter: func(r *ispRecord) string {
+			return firstNonEmpty(r.Organization, r.Traits.Organization)
+		},
 	},
 }
 
