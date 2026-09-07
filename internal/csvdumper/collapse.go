@@ -5,26 +5,16 @@ import (
 	"net/netip"
 )
 
-// Collapsing merges consecutive networks that carry an identical payload
-// into the largest aligned prefixes that cover them.
+// Collapsing merges adjacent same-payload networks into the largest aligned
+// prefixes covering them. One database feeds several tables: DB-IP's 88.8M
+// networks are cut at ISP boundaries, so dumped as `country` they yield 88.8M
+// rows where the data distinguishes 2.2M — and every row is an ip_trie prefix.
 //
-// It exists because one database can feed several tables. DB-IP's
-// "IP to Location + ISP" is a single file of ~88.8M networks, cut at ISP
-// and city boundaries; dumped as `country` that same granularity yields
-// 88.8M rows where the data only distinguishes ~1.2M. Every row is a
-// prefix in the ip_trie dictionary built on top, at roughly 165 bytes
-// each, so the difference is tens of gigabytes of RAM.
-//
-// Merging only ever combines two siblings that exactly fill their parent,
-// so a merged prefix covers precisely the addresses its members covered
-// and nothing else: lookups are unchanged. Networks with differing
-// payloads never share a run, and the source networks partition the
-// address space at leaf level, so no third network can hide inside a
-// merged supernet.
+// Only two siblings that exactly fill their parent ever merge, so a merged
+// prefix covers precisely what its members did: lookups are unchanged.
 
-// toPrefix converts what maxminddb hands back into a netip.Prefix.
-// SkipAliasedNetworks yields IPv4 in its native form, but a 4-in-6
-// mapped address with a /96..128 mask is handled too.
+// toPrefix converts what maxminddb returns into a netip.Prefix. IPv4 arrives
+// native under SkipAliasedNetworks; 4-in-6 with a /96..128 mask also works.
 func toPrefix(n *net.IPNet) (netip.Prefix, bool) {
 	addr, ok := netip.AddrFromSlice(n.IP)
 	if !ok {
@@ -64,10 +54,9 @@ func parentOf(a, b netip.Prefix) (netip.Prefix, bool) {
 	return parent, true
 }
 
-// run accumulates same-payload prefixes, merging as it goes. It behaves
-// like a binary counter: a push either merges with the top of the stack
-// and carries, or settles, so the stack stays shallow in practice. The
-// cap is a safety valve — flushing early only means less merging.
+// run accumulates same-payload prefixes, merging as it goes, like a binary
+// counter: a push either carries into the stack top or settles. The cap is a
+// safety valve — flushing early only means less merging.
 const runStackCap = 4096
 
 type run struct {

@@ -9,8 +9,7 @@ import (
 	"github.com/oschwald/maxminddb-golang"
 )
 
-// maxminddbNetworks aliases the iterator so the generic signature below
-// stays readable.
+// maxminddbNetworks aliases the iterator to keep the generic signature short.
 type maxminddbNetworks = maxminddb.Networks
 
 func removeUnsafeChars(strarr []string) []string {
@@ -86,13 +85,10 @@ func DumpRows[R any](
 	)
 
 	for networks.Next() {
-		// The same struct is reused for every network and maxminddb leaves
-		// fields absent from a record untouched, so without clearing it a
-		// missing field silently inherits the previous row's value. Not
-		// hypothetical: measured over all 88 815 946 networks of DB-IP's
-		// Location+ISP database, 9 246 803 (10.4%) carry no organization
-		// and 1 550 298 (1.7%) no autonomous_system_number — and without
-		// this every one of them was served the previous network's value.
+		// maxminddb leaves absent fields untouched and the struct is reused for
+		// the whole traversal, so without this a missing field inherits the
+		// previous network's value — 10.4% of DB-IP's networks have no
+		// organization, and every one of them was served a neighbour's.
 		var zero R
 		*record = zero
 
