@@ -74,6 +74,8 @@ resolve_mmdb() {
     MMDB_PATH="${gz%.gz}"
 }
 
+# Marks a month/type loaded, keyed on the collapse flag too — a collapsed
+# load is different data. Holds the row count, checked against the table.
 marker_path() {
     if [ "$GEOIP_COLLAPSE" = "1" ]; then
         echo "${DB_DIR}/${1}.${GEOIP_DATE}.collapsed.loaded"
