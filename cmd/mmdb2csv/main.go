@@ -27,8 +27,7 @@ var (
 
 func init() {
 	flag.BoolVar(&noQuotes, "no-quotes", false, "do not quote fields")
-	flag.BoolVar(&collapse, "collapse", false,
-		"merge consecutive networks with identical values into the largest aligned prefixes; lookups are unchanged")
+	flag.BoolVar(&collapse, "collapse", false, "merge adjacent equal-valued networks; lookups unchanged")
 	flag.StringVar(&dbTypeFlag, "db-type", "", "database type to dump: city, connections, country, isp, enterprise")
 	flag.StringVar(&dbPathFlag, "db-path", "", "path to the MMDB file")
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
