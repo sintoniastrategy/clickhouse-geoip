@@ -1,7 +1,7 @@
 CREATE DATABASE IF NOT EXISTS geoip;
 USE geoip;
 
--- Current-data lookups: straight at the type's dictionary.
+-- Current-data lookups
 
 DROP FUNCTION IF EXISTS x_geoip2_dict_get;
 CREATE FUNCTION x_geoip2_dict_get as (db_type, dict_key, ip) ->
