@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS geoip2_asn_history (
             toUInt8(toUInt16(splitByChar('/', prefix)[2]) + if(position(prefix, ':') = 0, 96, 0))), 1),
     net_end IPv6 MATERIALIZED
         tupleElement(IPv6CIDRToRange(toIPv6(splitByChar('/', prefix)[1]),
-            toUInt8(toUInt16(splitByChar('/', prefix)[2]) + if(position(prefix, ':') = 0, 96, 0))), 2)
+            toUInt8(toUInt16(splitByChar('/', prefix)[2]) + if(position(prefix, ':') = 0, 96, 0))), 2),
+
+    INDEX idx_net_end net_end TYPE minmax GRANULARITY 1
 )
 ENGINE = MergeTree
 PARTITION BY yyyymm
