@@ -269,12 +269,14 @@ done
 # shellcheck disable=SC2086  # deliberately unquoted: one word per db type
 publish_all $STAGED
 
-# They cache for LIFETIME and their source table was just swapped, so
-# without this a lookup answers from last month for up to that long.
-log "Reload dictionaries"
-for dt in country city asn; do
-    clickhouse-client -d "$CLICKHOUSE_DB" -q "SYSTEM RELOAD DICTIONARY geoip2_${dt}_trie"
-done
+# Only the published types: a reload builds a second copy before swapping.
+if [ -n "$STAGED" ]; then
+    log "Reload dictionaries:${STAGED}"
+    # shellcheck disable=SC2086  # deliberately unquoted: one word per db type
+    for dt in $STAGED; do
+        clickhouse-client -d "$CLICKHOUSE_DB" -q "SYSTEM RELOAD DICTIONARY geoip2_${dt}_trie"
+    done
+fi
 
 # Cleanup downloaded databases (>90 days). Markers are a few bytes and
 # outlive them deliberately, so an old month is not re-ingested.
