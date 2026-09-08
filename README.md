@@ -51,17 +51,14 @@ IPv4 and IPv6 are both supported. Unknown / private IPs return `NULL`.
 ## How it works
 
 ```
-db-ip Lite                bin/mmdb2csv            clickhouse-client
-.mmdb.gz  ──gunzip──▶ .mmdb ──────────▶ .csv ──────INSERT──────▶  geoip2_<type>__YYYYMM   (MergeTree, dated)
-                                                                         │
-                                                                  ip_trie dictionary
-                                                                         ▼
-                                                                  geoip2_<type>_trie__YYYYMM
-              INSERT … SELECT (load2)                                    │
-  geoip2_<type>  ◀──────────────────────────────────────────────────────┘ (latest month copied to
-  (MergeTree, "main") ──ip_trie──▶ geoip2_<type>_trie  (main dictionary)    the non-dated "main" objects)
-
-  meta_geoip2(yyyymm, db_type, target_dict) ──▶ meta_geoip2_dict   (maps a month → its dated trie dict)
+db-ip                     bin/mmdb2csv  ──pipe──▶  clickhouse-client
+.mmdb.gz  ──gunzip──▶ .mmdb ──────────▶ .csv ──────INSERT──────▶  geoip2_<type>__staging
+                                                                    │            │
+                                              EXCHANGE TABLES ──────┘            └────── INSERT … SELECT
+                                                       ▼                                        ▼
+  geoip2_<type>  ──ip_trie──▶  geoip2_<type>_trie                          geoip2_<type>_history
+  (MergeTree, live)            (the only dictionary; every function reads)  (MergeTree, PARTITION BY yyyymm;
+                                                                            no dictionary over it)
 ```
 
 For each db type (`country`, `city`, `asn`) the updater
@@ -71,16 +68,18 @@ For each db type (`country`, `city`, `asn`) the updater
    (`https://download.db-ip.com/free/dbip-<type>-lite-YYYY-MM.mmdb.gz`).
 2. **Converts** it to CSV with [`mmdb2csv`](cmd/mmdb2csv/) (a Go tool using the
    MaxMind `geoip2`/`maxminddb` readers — db-ip Lite uses the same MMDB schema).
-3. **Loads** the CSV into a dated table `geoip2_<type>__YYYYMM`.
-4. Creates a **dated `ip_trie` dictionary** `geoip2_<type>_trie__YYYYMM` over it.
-5. **Copies** the dated table into the non-dated "main" table `geoip2_<type>`,
-   which backs the main dictionary `geoip2_<type>_trie`.
-6. **Registers** the month in `meta_geoip2` and reloads the dictionaries.
+3. **Streams** it into `geoip2_<type>__staging` — nothing is written to disk
+   as CSV, and nothing goes live yet.
+4. **Archives** the month as a partition of `geoip2_<type>_history`, unless
+   `GEOIP_SNAPSHOTS=0`.
+5. **Publishes** every staged type with a single `EXCHANGE TABLES`, so the
+   live tables are never empty and the three types never disagree about which
+   month they hold.
+6. **Reloads** `geoip2_<type>_trie` so the new data is visible at once.
 
-The SQL functions resolve an IP through the dictionaries. The non-dated
-functions (`geoip2_country`, …) always use the latest loaded data; the dated
-functions (`geoip2_dated_country(dt, ip)`, …) can resolve historical months if
-you keep several loaded (see [dated lookups](#dated-lookups)).
+Current-data functions (`geoip2_country`, …) read the dictionary.
+Point-in-time functions (`geoip2_dated_country(dt, ip)`, …) read the history
+table — see [dated lookups](#dated-lookups).
 
 ---
 
@@ -164,17 +163,15 @@ Everything lives in the **`geoip`** database.
 
 | Table | Purpose |
 |---|---|
-| `geoip2_country__YYYYMM`, `geoip2_city__YYYYMM`, `geoip2_asn__YYYYMM` | Per-month source data (full column set). |
-| `geoip2_country`, `geoip2_city`, `geoip2_asn` | The "main" copy = latest loaded month. |
-| `meta_geoip2(yyyymm, db_type, target_dict)` | Registry mapping a month to its dated trie dictionary. |
+| `geoip2_country`, `geoip2_city`, `geoip2_asn` | Live data, full column set. Replaced wholesale by each load. |
+| `geoip2_<type>_history` | Every kept month, one partition per `yyyymm`. Same columns plus `yyyymm` and two `MATERIALIZED` range bounds. |
+| `geoip2_<type>__staging` | Exists only during a load; swapped in and dropped. |
 
 ### Dictionaries
 
 | Dictionary | Layout | Notes |
 |---|---|---|
-| `geoip2_<type>_trie` | `ip_trie` | Main lookup dict, `LIFETIME(14400)`. |
-| `geoip2_<type>_trie__YYYYMM` | `ip_trie` | Per-month dict, `LIFETIME(14400)`. |
-| `meta_geoip2_dict` | `complex_key_hashed` | `LIFETIME(0)` — reloaded by the updater. |
+| `geoip2_<type>_trie` | `ip_trie` | The only dictionary, `LIFETIME(14400)`. Nothing is built over history. |
 
 The `prefix` column holds CIDR strings (e.g. `8.8.8.0/24`); `ip_trie` does
 longest-prefix matching for both IPv4 and IPv6.
@@ -203,9 +200,9 @@ dated one called with `now()` — e.g. `geoip2_country(ip)` ≡ `geoip2_dated_co
 ### Generic getters (any attribute)
 
 ```sql
-geoip2_dated_country_get(dt, key, ip)
-geoip2_dated_city_get(dt, key, ip)
-geoip2_dated_asn_get(dt, key, ip)
+geoip2_country_get(key, ip)
+geoip2_city_get(key, ip)
+geoip2_asn_get(key, ip)
 ```
 
 `key` is any attribute of the corresponding trie dict:
@@ -215,77 +212,161 @@ geoip2_dated_asn_get(dt, key, ip)
 - **asn**: `autonomous_system_number`, `autonomous_system_organization`, `isp`, `organization`
 
 ```sql
-SELECT geoip2_dated_city_get(now(), 'postal_code', '8.8.8.8');
-SELECT geoip2_dated_asn_get(now(), 'autonomous_system_number', '1.1.1.1');
+SELECT geoip2_city_get('postal_code', '8.8.8.8');
+SELECT geoip2_asn_get('autonomous_system_number', '1.1.1.1');
 ```
+
+These exist only for current data. There is no dated equivalent — see below.
 
 ### Dated lookups
 
-The dated functions take a date and resolve the month **before** that date's
-month (`toYYYYMM(addMonths(dt, -1))`), i.e. data labelled month *M* is treated as
-active for dates in month *M+1*:
+`geoip2_dated_<x>(dt, ip)` reads `geoip2_<type>_history`, not a dictionary.
+`dt` resolves to the month **before** its own (`toYYYYMM(addMonths(dt, -1))`),
+so data labelled month *M* serves dates in *M+1*:
 
 ```sql
--- with month 202606 loaded, a July date resolves to it:
-SELECT geoip2_dated_country(toDate('2026-07-15'), '8.8.8.8');  -- United States
+-- with 202607 and 202608 loaded
+SELECT geoip2_dated_city(toDate('2026-08-15'), '32.94.23.0');  -- New York, from 202607
+SELECT geoip2_dated_city(toDate('2026-09-15'), '32.94.23.0');  -- Dallas,   from 202608
 ```
 
-If the resolved month is not loaded, the function **falls back to the main
-dictionary** (latest data). Because of the `-1` offset, the convenience
-functions (which call the dated functions with `now()`) normally resolve via
-this fallback unless you have last month's release loaded too. For
-point-in-time history, load several months and the dated dicts are selected
-automatically through `meta_geoip2_dict`.
+A month that was never loaded yields no rows, so the function returns `NULL`.
+A malformed address returns `NULL` too — the lookup uses `toIPv6OrNull`.
+
+**Why a table and not a dictionary.** An `ip_trie` over one month of a
+granular database runs to tens of gigabytes, it is never evicted once loaded
+(there is no `SYSTEM UNLOAD DICTIONARY`, and `ip_trie` has no bounded
+layout), and touching five months could exhaust a host. The same month as a
+partition costs disk and no memory at all. Measured on one lookup: a single
+granule range, a few MiB read, single-digit milliseconds — fine for the
+ad-hoc and dashboard queries this is for.
+
+Ranges make it work. The converter emits CIDR strings and the traversal
+yields **disjoint** networks, so exactly one range contains any address, and
+`ORDER BY net_start DESC LIMIT 1` gives what longest-prefix matching would.
+`net_start`/`net_end` are `MATERIALIZED` and part of the sorting key, so the
+primary key prunes on them. An IPv4 prefix maps into `::ffff:0:0/96`, so one
+expression covers both families.
+
+**Two limits worth knowing.**
+
+`dt` and `ip` must be **constants**. A correlated scalar subquery is not
+supported, so these functions cannot be applied to a column. For bulk work,
+join the history table directly — and unlike the dictionary version, that
+actually works with the month varying per row:
+
+```sql
+SELECT e.ip, argMax(h.city_name, length(h.prefix)) AS city
+FROM events AS e
+ARRAY JOIN <candidate prefixes of e.ip> AS cand
+LEFT JOIN geoip.geoip2_city_history AS h
+       ON h.yyyymm = toYYYYMM(addMonths(e.ts, -1)) AND h.prefix = cand
+GROUP BY e.ip;
+```
+
+There is **no generic dated getter**. `dictGet` took the attribute name as a
+string argument; a subquery cannot select a column by a string, so only the
+named wrappers exist. Reach anything else by querying
+`geoip2_<type>_history` directly.
 
 ---
 
 ## Design notes & limitations
 
-**Why the dated machinery exists.** The original goal was *historical* geo lookup:
-given a table of events with a timestamp and an IP, recover the geo of that IP
-**as it was at that time**. That's why `dt` is threaded through every function and
-why there's a `meta_geoip2_dict` mapping each month to its own dated `ip_trie`
-dictionary.
+### Why the current-data path is still a dictionary
 
-**The hard limit: `dictGet` needs a constant dictionary name.** In
-[`sql/02_common_funcs.sql`](sql/02_common_funcs.sql) the dated getter resolves the
-dictionary name from the date and then calls:
+Longest-prefix matching by IP inside a scalar expression is the one thing a
+table cannot do, and the production consumer — a materialized view that
+enriches rows as they are inserted — needs exactly that, per row, at insert
+rate. So the live month stays an `ip_trie` and history does not.
 
-```sql
-dictGetOrNull( x_geoip2_dated_dictname(dt, db_type), key, tuple(<ip>) )
-```
+### `dictGet` needs a constant dictionary name
 
-ClickHouse requires the **first argument of `dictGet*` to be a constant**.
-`x_geoip2_dated_dictname(dt, …)` only folds to a constant when `dt` itself is
-constant. So:
+Earlier versions resolved a per-month dictionary from the date and called
+`dictGetOrNull(<name>, key, tuple(<ip>))`. ClickHouse requires the first
+argument of `dictGet*` to be a constant, and a name computed from a column
+is not. So:
 
 | Call | Resolved dict name | Works over a table? |
 |---|---|---|
-| `geoip2_country(ip_col)` = `…(now(), ip_col)` | constant | ✅ yes |
+| `geoip2_country(ip_col)` | constant | ✅ yes |
 | `geoip2_dated_country(toDate('2023-05-15'), ip_col)` | constant (literal) | ✅ yes |
 | `geoip2_dated_country(timestamp_col, ip_col)` | **per-row** | ❌ rejected |
 
-The *key* (the IP) being a column is fine — that is what dictionaries are for. The
-thing that **cannot vary per row** is the date-driven dictionary selection. So the
-one use case this design was built for — enriching a whole historical table from
-its own timestamp column in a single pass — is exactly the one `dictGet` cannot do.
-This is **not** a version quirk: in current ClickHouse (24.x / 25.x) a dictionary is
-still resolved once per query, not per row.
+The *key* being a column is fine — that is what dictionaries are for. What
+cannot vary per row is the date-driven dictionary selection. So the one use
+case the design was built for — enriching a whole historical table from its
+own timestamp column — was exactly the one it could not serve. This is not a
+version quirk: in current ClickHouse a dictionary is still resolved once per
+query.
 
-**What to do instead:**
+The history table has no such limit on the join path, which is why the
+recipe above works.
 
-- **Enrich at write time with a materialized view** *(the approach used in
-  production)*. On insert the date is a constant, so the lookup is legal; the geo is
-  baked into the row and is accurate as of the insertion time. This is the idiomatic
-  ClickHouse pattern and sidesteps the limitation entirely.
-- **For batch back-fill over existing history**, use a range **`JOIN`** against the
-  dated source tables (`geoip2_<type>__YYYYMM`) — match the IP into the CIDR range
-  *and* the row's month — instead of `dictGet`. A `JOIN` evaluates per-row on both
-  sides, so the month is allowed to vary per row.
+### Upgrading from a version with dated dictionaries
 
-The dated functions stay useful for **constant-date point lookups** (dashboards,
-ad-hoc "where was this IP in 2024-03") and for the automatic current/fallback
-dictionary — just don't hand them a per-row timestamp column.
+Nothing here drops anything. The updater stops *creating* the old objects
+and leaves what already exists, so an upgrade never destroys data on its
+own — but it also means a server that ran an earlier release keeps a layer
+that no longer has anything under it. Run this once, by hand.
+
+The functions first. They are the misleading part: an orphaned
+`geoip2_dated_city_get()` still resolves a dictionary name out of
+`meta_geoip2`, which this version stops maintaining, so the call fails with
+`Code: 36` rather than saying the function is gone. Drop them and a
+forgotten caller gets `UNKNOWN_FUNCTION` instead.
+
+```sql
+-- the generic getters: no table-backed equivalent exists, because dictGet
+-- took the attribute name as a string and a subquery cannot select a
+-- column by a string
+DROP FUNCTION IF EXISTS geoip2_dated_city_get;
+DROP FUNCTION IF EXISTS geoip2_dated_country_get;
+DROP FUNCTION IF EXISTS geoip2_dated_asn_get;
+
+-- and the layer they resolved through
+DROP FUNCTION IF EXISTS x_geoip2_dated_dict_get;
+DROP FUNCTION IF EXISTS x_geoip2_dated_dictname;
+```
+
+Order matters only against the updater, not among these: run them **after**
+a load with the new version, because until `sql/03_*_funcs.sql` has run the
+named getters (`geoip2_dated_city` and friends) still route through
+`x_geoip2_dated_dict_get`, and dropping it first breaks them.
+
+Then the objects — but only once the months you care about are in
+`geoip2_<type>_history`, because until then the month tables are the only
+copy:
+
+```sql
+-- fill history from a month table first
+INSERT INTO geoip.geoip2_city_history SELECT 202601, * FROM geoip.geoip2_city__202601;
+
+-- then drop, dictionary before table: ClickHouse refuses to drop a table a
+-- dictionary still reads, with Code: 630 HAVE_DEPENDENT_OBJECTS
+DROP DICTIONARY IF EXISTS geoip.geoip2_city_trie__202601;
+DROP TABLE      IF EXISTS geoip.geoip2_city__202601;
+
+-- the registry, once no month tables are left
+DROP DICTIONARY IF EXISTS geoip.meta_geoip2_dict;
+DROP TABLE      IF EXISTS geoip.meta_geoip2;
+
+-- and the empty fallbacks, if a version that made them ever ran here
+DROP DICTIONARY IF EXISTS geoip.geoip2_city_trie__absent;
+DROP TABLE      IF EXISTS geoip.geoip2_city__absent;
+```
+
+`SELECT <yyyymm>, *` works because the month table has the same columns in
+the same order as the history table minus `yyyymm` — both came from one
+template. Check the row counts before dropping anything.
+
+### Enrich at write time where you can
+
+On insert the date is a constant, so the lookup is legal, the geo is baked
+into the row, and it is accurate as of insertion. This is the idiomatic
+ClickHouse pattern, and it means a query over old rows already reads the geo
+recorded back then — which is most of what point-in-time lookups get asked
+for.
 
 ---
 
@@ -337,6 +418,10 @@ All via environment variables (defaults shown):
 | `CLICKHOUSE_YYYYMM` | `$(date +%Y%m)` | Month label / dated-object suffix, e.g. `202606`. |
 | `GEOIP_COUNTRY_URL` / `GEOIP_CITY_URL` / `GEOIP_ASN_URL` | db-ip URLs derived from `GEOIP_DATE` | Override the download source. |
 | `MMDB2CSV_VERSION` | `latest` | Release tag of the prebuilt `mmdb2csv` to download, e.g. `v0.1.0`. |
+| `GEOIP_COUNTRY_FILE` / `GEOIP_CITY_FILE` / `GEOIP_ASN_FILE` | empty | Use an `.mmdb` already on disk instead of downloading one. A single combined database may back all three. Set `GEOIP_DATE` and `CLICKHOUSE_YYYYMM` to the month that file *is*, since they otherwise come from the clock and would mislabel it. |
+| `GEOIP_SNAPSHOTS` | `1` | Keep each month as a partition of `geoip2_<type>_history`, so `geoip2_dated_*` can answer. History is a table and nothing else, so a kept month costs disk and no memory. `0` loads the live tables only, and the dated getters return `NULL` for every month. |
+| `GEOIP_COLLAPSE` | `1` | Pass `-collapse` to the converter: merge consecutive networks with identical values into the largest aligned prefixes. Lookups are unchanged. `0` dumps every network verbatim. |
+| — | — | The converter is piped straight into `clickhouse-client`, so no CSV is written. `db/` holds only the downloaded `.mmdb` files and a few-byte `*.loaded` marker per month and type. |
 | `GITHUB_REPO` | `sintoniastrategy/clickhouse-geoip` | Repo to fetch the `mmdb2csv` release from. |
 
 Load a specific past month (download + label must agree):
@@ -352,17 +437,16 @@ docker compose run --rm -e GEOIP_DATE=2026-05 -e CLICKHOUSE_YYYYMM=202605 update
 Re-run the updater. It:
 
 - skips files/tables already present for that month (idempotent),
-- inserts a new `geoip2_<type>__YYYYMM` set when the month changes,
-- refreshes `geoip2_<type>` (main) to the newest month,
+- adds a `geoip2_<type>_history` partition when the month changes,
+- swaps the live tables to the new month with one `EXCHANGE TABLES`,
 - `SYSTEM RELOAD`s the dictionaries so changes are visible immediately.
 
-Old downloaded files in `db/` are pruned after 90 days. Old dated tables/dicts
-are **not** dropped automatically — keep them for history, or drop manually:
+Old downloaded files in `db/` are pruned after 90 days; the markers are a few
+bytes and outlive them deliberately. History partitions are **not** dropped
+automatically — keep them, or drop one:
 
 ```sql
-DROP DICTIONARY IF EXISTS geoip.geoip2_city_trie__202601;
-DROP TABLE      IF EXISTS geoip.geoip2_city__202601;
-DELETE FROM geoip.meta_geoip2 WHERE yyyymm = 202601;
+ALTER TABLE geoip.geoip2_city_history DROP PARTITION 202601;
 ```
 
 ---
@@ -371,9 +455,8 @@ DELETE FROM geoip.meta_geoip2 WHERE yyyymm = 202601;
 
 These were verified while building this setup (ClickHouse 24.8):
 
-- **The `default` user must exist (loopback).** `ip_trie` and `meta_geoip2_dict`
-  dictionaries open an internal connection as `default` to read their source
-  tables. If you delete `default` (e.g. by setting `CLICKHOUSE_USER` on the
+- **The `default` user must exist (loopback).** `ip_trie` dictionaries open an
+  internal connection as `default` to read their source tables. If you delete `default` (e.g. by setting `CLICKHOUSE_USER` on the
   official image, which writes `<default remove="remove"/>`), every dictionary
   fails with `AUTHENTICATION_FAILED`. The compose stack therefore *adds* a
   `geoip` user via a mounted `users.d` file and leaves `default` intact.
@@ -386,9 +469,9 @@ These were verified while building this setup (ClickHouse 24.8):
 - **Database bootstrap:** the schema is applied only after
   `CREATE DATABASE IF NOT EXISTS geoip`, because connecting with `-d geoip`
   requires the DB to already exist.
-- **Dictionary freshness:** `meta_geoip2_dict` is `LIFETIME(0)` (never
-  auto-reloads) and the trie dicts cache for `LIFETIME(14400)`, so the updater
-  ends with `SYSTEM RELOAD DICTIONARY` to make new data/months visible at once.
+- **Dictionary freshness:** the trie dicts cache for `LIFETIME(14400)`, so the
+  updater ends with `SYSTEM RELOAD DICTIONARY` to make new data visible at
+  once. History needs no reload — it is a table.
 - **`CLICKHOUSE_DB` is effectively fixed to `geoip`** — the SQL files and UDFs
   reference `geoip.*` directly.
 
@@ -399,7 +482,8 @@ These were verified while building this setup (ClickHouse 24.8):
 | Symptom | Cause / fix |
 |---|---|
 | `AUTHENTICATION_FAILED` inside a `dictGet`/function | `default` user missing or can't read the tables. Don't remove `default`; ensure it works over loopback. |
-| `Dictionary (geoip.geoip2_*__YYYYMM) not found` | `meta_geoip2` holds a table name instead of the trie dict name — re-run the updater (fixed in `insert_meta`); `TRUNCATE meta_geoip2` first if it has stale rows. |
+| `geoip2_dated_*` returns `NULL` for a month you expected | That month has no partition in `geoip2_<type>_history`. Check with `SELECT DISTINCT yyyymm FROM geoip.geoip2_city_history`. Remember the offset: a September date reads the month labelled August. |
+| `Correlated subqueries are not supported` from a dated getter | It was applied to a column. `dt` and `ip` must be constants; join `geoip2_<type>_history` for bulk work. |
 | `Database geoip does not exist` on the first schema | Run via the updater (it pre-creates the DB), or `CREATE DATABASE geoip` manually. |
 | Lookups return stale data after an update | `SYSTEM RELOAD DICTIONARY geoip.geoip2_country_trie` (and the others). |
 | `mmdb2csv binary not found` | The updater auto-fetches/builds it; by hand: `go build -o bin/mmdb2csv ./cmd/mmdb2csv` (see [Install](#install)). |
@@ -414,8 +498,8 @@ These were verified while building this setup (ClickHouse 24.8):
 bin/clickhouse-geoip-updater.sh   Orchestrates download → convert → load → dicts
 cmd/mmdb2csv/                     Go source for the MMDB→CSV converter (main)
 internal/csvdumper/               Per-db-type CSV row dumpers
-sql/00_base.sql                   geoip DB, meta table + dict
-sql/01_*.sql.template             Per-type tables + ip_trie dicts (YYYYMM templated)
+sql/00_base.sql                   geoip DB
+sql/01_*.sql                      Per-type live table + ip_trie dict + history table
 sql/02_common_funcs.sql           Dict-resolution UDFs
 sql/03_*_funcs.sql                Public country/city/asn UDFs
 Dockerfile                        Updater image (Go build + clickhouse-client)
@@ -427,8 +511,11 @@ docker/clickhouse-users.xml       Adds the `geoip` user (keeps `default`)
 LICENSE                           MIT (code); data is db-ip CC BY 4.0
 ```
 
-The `*.sql.template` files are rendered at run time into `*.yyyymm.sql` (dated
-objects) and `*.main.sql` (non-dated objects) by substituting `YYYYMM`.
+Every `sql/*.sql` is executed in name order. Earlier versions rendered the
+per-type schemas from `*.sql.template` into generated `*.main.sql`,
+`*.yyyymm.sql` and `*.absent.sql`; there is nothing left to substitute, so the
+updater deletes those leftovers — a release unpacked in place would otherwise
+keep executing them.
 
 ---
 

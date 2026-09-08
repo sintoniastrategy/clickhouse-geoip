@@ -142,7 +142,7 @@ var cityColumns = []Column[geoip2.City]{
 	},
 }
 
-func DumpCity(networks *maxminddb.Networks, writer *csv.Writer, noQuotes bool) error {
+func DumpCity(networks *maxminddb.Networks, writer *csv.Writer, noQuotes bool, collapse bool) error {
 	rec := geoip2.City{}
-	return DumpRows(networks, writer, noQuotes, &rec, cityColumns)
+	return DumpRows(networks, writer, noQuotes, collapse, &rec, cityColumns)
 }
