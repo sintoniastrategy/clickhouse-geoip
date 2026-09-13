@@ -63,7 +63,7 @@ CREATE DICTIONARY IF NOT EXISTS geoip2_city_trie (
 PRIMARY KEY prefix
 SOURCE(CLICKHOUSE(DB 'geoip' TABLE 'geoip2_city'))
 LAYOUT(ip_trie)
-LIFETIME(14400);
+LIFETIME(0);
 
 CREATE TABLE IF NOT EXISTS geoip2_city_history (
     yyyymm UInt32,

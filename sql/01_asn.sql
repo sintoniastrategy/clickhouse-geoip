@@ -23,7 +23,7 @@ CREATE DICTIONARY IF NOT EXISTS geoip2_asn_trie (
 PRIMARY KEY prefix
 SOURCE(CLICKHOUSE(DB 'geoip' TABLE 'geoip2_asn'))
 LAYOUT(ip_trie)
-LIFETIME(14400);
+LIFETIME(0);
 
 CREATE TABLE IF NOT EXISTS geoip2_asn_history (
     yyyymm UInt32,

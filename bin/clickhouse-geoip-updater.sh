@@ -170,12 +170,8 @@ publish_all() {
         done
     fi
 
-    # Markers are written only now: before the exchange nothing was live,
-    # so a run that died earlier must reload rather than skip.
     for dt in "$@"; do
         clickhouse-client -d "$CLICKHOUSE_DB" -q "DROP TABLE IF EXISTS geoip2_${dt}__staging"
-        clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM geoip2_${dt}" > "$(marker_path "$dt")"
-        log "Loaded: geoip2_${dt} $(cat "$(marker_path "$dt")") rows"
     done
 }
 
@@ -275,6 +271,8 @@ if [ -n "$STAGED" ]; then
     # shellcheck disable=SC2086  # deliberately unquoted: one word per db type
     for dt in $STAGED; do
         clickhouse-client -d "$CLICKHOUSE_DB" -q "SYSTEM RELOAD DICTIONARY geoip2_${dt}_trie"
+        clickhouse-client -d "$CLICKHOUSE_DB" -q "SELECT count() FROM geoip2_${dt}" > "$(marker_path "$dt")"
+        log "Loaded: geoip2_${dt} $(cat "$(marker_path "$dt")") rows"
     done
 fi
 
