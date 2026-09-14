@@ -171,7 +171,7 @@ Everything lives in the **`geoip`** database.
 
 | Dictionary | Layout | Notes |
 |---|---|---|
-| `geoip2_<type>_trie` | `ip_trie` | The only dictionary, `LIFETIME(14400)`. Nothing is built over history. |
+| `geoip2_<type>_trie` | `ip_trie` | The only dictionary, `LIFETIME(0)`. Nothing is built over history. |
 
 The `prefix` column holds CIDR strings (e.g. `8.8.8.0/24`); `ip_trie` does
 longest-prefix matching for both IPv4 and IPv6.
@@ -469,9 +469,10 @@ These were verified while building this setup (ClickHouse 24.8):
 - **Database bootstrap:** the schema is applied only after
   `CREATE DATABASE IF NOT EXISTS geoip`, because connecting with `-d geoip`
   requires the DB to already exist.
-- **Dictionary freshness:** the trie dicts cache for `LIFETIME(14400)`, so the
-  updater ends with `SYSTEM RELOAD DICTIONARY` to make new data visible at
-  once. History needs no reload — it is a table.
+- **Dictionary freshness:** the trie dicts are `LIFETIME(0)` — never reloaded
+  on their own — so the updater ends with `SYSTEM RELOAD DICTIONARY` for each
+  published type to make new data visible at once. History needs no reload
+  — it is a table.
 - **`CLICKHOUSE_DB` is effectively fixed to `geoip`** — the SQL files and UDFs
   reference `geoip.*` directly.
 
