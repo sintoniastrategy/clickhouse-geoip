@@ -59,7 +59,6 @@ CREATE DICTIONARY IF NOT EXISTS geoip2_city_trie (
     location_time_zone String,
 
     postal_code String,
-
     subdivisions_iso_code String
 )
 PRIMARY KEY prefix
