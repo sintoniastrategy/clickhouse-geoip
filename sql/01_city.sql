@@ -58,7 +58,9 @@ CREATE DICTIONARY IF NOT EXISTS geoip2_city_trie (
     location_metro_code UInt64,
     location_time_zone String,
 
-    postal_code String
+    postal_code String,
+
+    subdivisions_iso_code String
 )
 PRIMARY KEY prefix
 SOURCE(CLICKHOUSE(DB 'geoip' TABLE 'geoip2_city'))
