@@ -208,7 +208,7 @@ geoip2_asn_get(key, ip)
 `key` is any attribute of the corresponding trie dict:
 
 - **country**: `country_geoname_id`, `country_is_in_european_union`, `country_iso_code`, `country_name`
-- **city**: `city_geoname_id`, `city_name`, `location_accuracy_radius`, `location_latitude`, `location_longitude`, `location_metro_code`, `location_time_zone`, `postal_code`
+- **city**: `city_geoname_id`, `city_name`, `location_accuracy_radius`, `location_latitude`, `location_longitude`, `location_metro_code`, `location_time_zone`, `postal_code`, `subdivisions_iso_code`
 - **asn**: `autonomous_system_number`, `autonomous_system_organization`, `isp`, `organization`
 
 ```sql
